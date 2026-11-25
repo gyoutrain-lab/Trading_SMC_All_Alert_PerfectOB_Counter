@@ -1675,7 +1675,7 @@ async function run(){
       else if(Date.now()-(AD.ld||0)>40000){AD.ld=Date.now();await load(true)}
       let vd={t:'checking',s:''};try{vd=verdict(S.sig)}catch(e){}
       const fin=S.sym===r.sym&&S.sig&&S.sig.entry!=null&&S.sig.dir===g.dir&&/^ENTRY POINT/.test(vd.t);
-      if(fin&&!AD.sent[base+'E']){AD.sent[base+'E']=Date.now();AD.sent[lk]=Date.now();svS();alarm(`${r.sym} 15m ${dr} ENTRY${g.pob&&g.pob.score===5?' PERFECT OB 5/5':''}. The main panel says ${vd.t.replace(/ ·.*/,'')}. Entry ${fmt(p.entry,r.sym)}. ${sl}`,'ENTRY')}
+      if(fin&&!AD.sent[base+'E']){AD.sent[base+'E']=Date.now();try{window.MTB&&MTB.send({sym:r.sym,dir:g.dir,entry:p.entry,sl:p.sl,tp:p.tp1,tp2:p.tp2,tf:'15m',kind:'ENTRY'})}catch(e){}AD.sent[lk]=Date.now();svS();alarm(`${r.sym} 15m ${dr} ENTRY${g.pob&&g.pob.score===5?' PERFECT OB 5/5':''}. The main panel says ${vd.t.replace(/ ·.*/,'')}. Entry ${fmt(p.entry,r.sym)}. ${sl}`,'ENTRY')}
       else if(store('rdPre')==='1'&&!fin&&!g.inZone&&g.dist<=1.5&&!AD.sent[base+'P']){AD.sent[base+'P']=Date.now();AD.sent[lk]=Date.now();svS();alarm(`${r.sym} 15m ${dr} setup is approaching ${fmt(p.entry,r.sym)}. Not an entry yet. ${sl}`,'PRE')}
       $('#adBody').insertAdjacentHTML('beforeend',`<div class="hint">Final check (same as the main panel) for ${r.sym}: <b>${esc(vd.t)}</b> ${esc((vd.s||'').slice(0,170))}</div>`)}
   }finally{AD.busy=false;AD.last=Date.now()}}
@@ -1737,7 +1737,7 @@ async function tfRun(){
             txt:`${nm} ${tf} ${K.dir>0?'BUY':'SELL'} ENTRY READY, CRT${pb&&pb.d===K.dir&&pb.score>=4?' + OB '+pb.score+'/5':''}. ${K.dir>0?'Low':'High'} swept, range ${f(K.lo)} to ${f(K.hi)} reclaimed. SL beyond ${f(K.ext)}, TP1 ${f(K.mid)}, TP2 ${f(K.tgt)} (${rr.toFixed(1)}R to TP1). Reclaim confirmed by the last closed candle, HTF aligned.`})}
         if(window.rdBigOn&&rdBigOn()){const bm=bigMove(d,A,sym,tf,ht,px);if(bm&&bm.ok)hit.push(bm)}
         if(hit.length){st=hit.map(h=>(h.dir>0?'BUY ':'SELL ')+h.kind).join(' + ');cls=hit[0].dir>0?'up':'dn';
-          hit.filter(h=>!AD.ts[h.key]&&dbnOK(h.key,holdMs(tf))).forEach(h=>{AD.ts[h.key]=Date.now();svT();tfAlert(tf,h.dir,h.kind,h.txt);rdyReg(h,sym,tf);pobTrack(sym,tf,h,pb,K);st+=' · alerted'})}else if(window.RDW&&RDW[sym+'|'+tf]){st='wait · '+RDW[sym+'|'+tf];cls='warn'}
+          hit.filter(h=>!AD.ts[h.key]&&dbnOK(h.key,holdMs(tf))).forEach(h=>{AD.ts[h.key]=Date.now();svT();try{window.MTB&&MTB.send({sym,dir:h.dir,entry:h.entry,sl:h.sl,tp:h.tp1,tf,kind:h.kind})}catch(e){}tfAlert(tf,h.dir,h.kind,h.txt);rdyReg(h,sym,tf);pobTrack(sym,tf,h,pb,K);st+=' · alerted'})}else if(window.RDW&&RDW[sym+'|'+tf]){st='wait · '+RDW[sym+'|'+tf];cls='warn'}
       }catch(e){st=String(e.message).slice(0,50);cls='warn'}
       {const hh=`<tr><td>${sym}</td><td>${tf}</td><td class="${cls}">${esc(st)}</td></tr>`;(AD.rowc=AD.rowc||{})[sym+'|'+tf]=hh;rows.push(hh)}}
     $('#adTl').innerHTML=(auto?hintAuto():'')+(rows.length?`<table><thead><tr><th>Symbol</th><th>TF</th><th>Early entry (${new Date().toLocaleTimeString()})</th></tr></thead><tbody>${rows.join('')}</tbody></table>`:(sel.length?'':'<div class="hint">Tick at least one timeframe.</div>'))
@@ -2668,6 +2668,63 @@ $('#cdAll').addEventListener('click',testAll);
 window.CDX={plan,vd,sum,cdRun,kk,res:CD.res,wl,qsig};
 
 render();
+})();
+</script>
+<script>
+/* ===== MT5 ALGO BRIDGE: sinyal aplikasi -> ntfy (ditandatangani SHA-256) -> SMC_Bridge_EA di MT5 Finex ===== */
+(function(){
+const g=k=>{try{return localStorage.getItem(k)||''}catch(e){return''}},sv=(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}};
+const dg=p=>p>=1000?2:p>=20?3:5, seen={}, st={ok:0,fail:0,last:'belum ada kiriman',cls:''};
+async function sha(t){if(!(window.crypto&&crypto.subtle))throw new Error('crypto.subtle tidak tersedia: buka lewat https atau localhost');
+  const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(t));return Array.from(new Uint8Array(b)).map(x=>x.toString(16).padStart(2,'0')).join('')}
+const rnd=n=>{const a=new Uint8Array(n);crypto.getRandomValues(a);return Array.from(a).map(x=>'abcdefghjkmnpqrstuvwxyz23456789'[x%31]).join('')};
+async function post(sym,dir,e,sl,tp,tf,kind){
+  const topic=g('mtbTopic').trim(),sec=g('mtbSec');
+  if(!topic||topic.length<8||sec.length<12)throw new Error('isi topic (min 8) dan secret (min 12 karakter)');
+  let m=sym;if(kind!=='PING'){const mp=(typeof fdMap==='function'?fdMap():{})[String(sym).toUpperCase()];if(!mp)throw new Error(sym+' belum ada di Symbol map (kartu Broker feed)');m=mp}
+  const id=Date.now().toString(36)+rnd(4),t=Math.floor(Date.now()/1000),d=dg(+e||0),
+    f=x=>(+x||0).toFixed(d),parts=[id,m,dir,f(e),f(sl),f(tp),tf,kind,String(t)],
+    sig=await sha(sec+'|'+parts.join('|')),msg='SMCB1|'+parts.join('|')+'|'+sig;
+  let r;try{r=await fetch('https://ntfy.sh/'+encodeURIComponent(topic),{method:'POST',body:msg})}catch(x){throw new Error('offline / diblokir')}
+  if(!r.ok)throw new Error('ntfy HTTP '+r.status);return m}
+function ui(){const b=document.getElementById('mtbBtn'),s=document.getElementById('mtbSt');if(!b)return;const on=g('mtbOn')==='1';
+  b.textContent='Bridge: '+(on?'ON':'OFF');b.classList.toggle('primary',on);s.textContent=st.last+' · terkirim '+st.ok+' · gagal '+st.fail;s.className='badge '+st.cls}
+const MTB={
+  async send(o){
+    if(g('mtbOn')!=='1')return;
+    if(o.kind==='ENTRY'?false:g('mtbRdy')!=='1')return;
+    try{if(typeof PRO!=='undefined'&&PRO.snoozed())return}catch(e){}
+    if(!(o.entry>0&&o.sl>0))return;
+    const tp=(g('mtbTp')==='tp2'&&o.tp2>0)?o.tp2:o.tp;if(!(tp>0))return;
+    const dir=o.dir>0?'BUY':'SELL',key=[o.sym,dir,o.tf,o.kind,(+o.entry).toFixed(3)].join('|');
+    if(seen[key]&&Date.now()-seen[key]<9e5)return;seen[key]=Date.now();
+    try{const m=await post(o.sym,dir,o.entry,o.sl,tp,o.tf,o.kind);st.ok++;st.cls='up';st.last=new Date().toLocaleTimeString()+' '+dir+' '+m+' '+o.kind}
+    catch(e){st.fail++;st.cls='dn';st.last='ERR '+e.message}
+    ui()},
+  async ping(){try{await post('PING','BUY',0,0,0,'-','PING');st.ok++;st.cls='up';st.last=new Date().toLocaleTimeString()+' PING terkirim: lihat Experts/Journal di MT5'}catch(e){st.fail++;st.cls='dn';st.last='ERR '+e.message}ui()}};
+window.MTB=MTB;
+function build(){
+  const fd=document.getElementById('fdBtn');if(!fd||document.getElementById('mtbCard'))return;
+  const host=fd.closest('.card');if(!host)return;
+  host.insertAdjacentHTML('afterend',`<div class="card" id="mtbCard"${host.dataset.tab?` data-tab="${host.dataset.tab}"`:''}><h3>MT5 Algo Bridge · kirim sinyal ke EA di MT5 Finex</h3>
+  <div class="ctl"><button id="mtbBtn">Bridge: OFF</button><button id="mtbPing">Test PING ke EA</button><button id="mtbGen">Generate topic + secret</button><span class="badge" id="mtbSt">–</span></div>
+  <div class="row"><span style="width:110px;color:var(--mut)">ntfy topic</span><input id="mtbTopic" style="flex:1;min-width:0" placeholder="topic khusus bridge (bukan topic alert)"></div>
+  <div class="row"><span style="width:110px;color:var(--mut)">Secret</span><input id="mtbSecI" type="password" style="flex:1;min-width:0" placeholder="min 12 karakter, sama dengan input EA"></div>
+  <div class="row"><span style="width:110px;color:var(--mut)">Target TP</span><select id="mtbTp"><option value="tp1">TP1 (lebih sering kena)</option><option value="tp2">TP2 (lebih jauh)</option></select></div>
+  <div class="row"><label><input type="checkbox" id="mtbRdy"> Ikut kirim alert TF READY (SMC/CRT). Default hanya ENTRY terverifikasi grade A.</label></div>
+  <div class="hint">Alur: aplikasi → ntfy (pesan bertanda tangan) → EA di MT5 memeriksa tanda tangan, umur sinyal, spread, R:R, risiko lalu order. Snooze alert juga menghentikan pengiriman. Pasang <b>SMC_Bridge_EA.mq5</b> dengan topic + secret yang sama. EA default DRY-RUN: ubah InpEnableTrading hanya setelah log dry-run terbukti benar di demo.</div></div>`);
+  const $=id=>document.getElementById(id);
+  $('mtbTopic').value=g('mtbTopic');$('mtbSecI').value=g('mtbSec');$('mtbTp').value=g('mtbTp')||'tp1';$('mtbRdy').checked=g('mtbRdy')==='1';
+  $('mtbTopic').addEventListener('change',e=>sv('mtbTopic',e.target.value.trim()));
+  $('mtbSecI').addEventListener('change',e=>sv('mtbSec',e.target.value));
+  $('mtbTp').addEventListener('change',e=>sv('mtbTp',e.target.value));
+  $('mtbRdy').addEventListener('change',e=>sv('mtbRdy',e.target.checked?'1':'0'));
+  $('mtbBtn').addEventListener('click',()=>{sv('mtbOn',g('mtbOn')==='1'?'0':'1');ui()});
+  $('mtbPing').addEventListener('click',()=>MTB.ping());
+  $('mtbGen').addEventListener('click',()=>{const t='smcb-'+rnd(22),s=rnd(28);sv('mtbTopic',t);sv('mtbSec',s);$('mtbTopic').value=t;$('mtbSecI').value=s;$('mtbSecI').type='text';
+    st.cls='';st.last='Salin topic + secret ini ke input EA, lalu simpan di tempat aman';ui()});
+  ui()}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',build);else build();
 })();
 </script>
 </body>
