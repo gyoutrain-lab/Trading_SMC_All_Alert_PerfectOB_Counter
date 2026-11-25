@@ -378,13 +378,39 @@ const PRO=(()=>{
    const reg=navigator.serviceWorker&&await navigator.serviceWorker.getRegistration();
    if(reg&&reg.showNotification)return reg.showNotification(title,{body,requireInteraction:true,vibrate:[300,100,300],tag:title,renotify:true});
    new Notification(title,{body,requireInteraction:true})}catch(e){try{new Notification(title,{body})}catch(x){}}};
- P.out=(title,msg,pri,tags)=>{P.hist(title,msg);P.note(title,msg);
-   const nt=((document.getElementById('adNt')||{}).value||'').trim();
-   const rec=(ch,ok,info)=>{window.PUSHST=window.PUSHST||{};PUSHST[ch]={ok,info,at:Date.now()};try{P.status&&P.status()}catch(e){}};
-   if(nt){const hdr=()=>fetch('https://ntfy.sh/'+encodeURIComponent(nt),{method:'POST',body:msg,headers:{Title:String(title).replace(/[^\x20-\x7e]/g,''),Priority:String(pri||4),Tags:tags||'eyes'}});
-     const send=n=>fetch('https://ntfy.sh/',{method:'POST',body:JSON.stringify({topic:nt,title:String(title),message:String(msg),priority:pri||4,tags:String(tags||'eyes').split(','),click:'https://gyoutrain-lab.github.io/Trading_SMC_Scan_Multi_Asset_Alert_Adv_CRT/'})}).then(r=>{if(!r.ok)return hdr();return r}).then(r=>{rec('ntfy',r.ok,'HTTP '+r.status);if(!r.ok&&n)setTimeout(()=>send(n-1),3000)}).catch(()=>{rec('ntfy',false,'blocked or offline');if(n)setTimeout(()=>send(n-1),3000)});send(3)}
-   const tk=store('adTg'),ci=store('adTc');
-   if(tk&&ci){const tg=n=>fetch('https://api.telegram.org/bot'+encodeURIComponent(tk)+'/sendMessage?chat_id='+encodeURIComponent(ci)+'&text='+encodeURIComponent(title+'\n'+msg)).then(r=>r.json()).then(j=>{rec('Telegram',!!j.ok,j.ok?'sent':String(j.description||'error').slice(0,60));if(!j.ok&&n&&!/chat not found|Unauthorized|bot token/i.test(j.description||''))setTimeout(()=>tg(n-1),3000)}).catch(()=>{rec('Telegram',false,'blocked or offline');if(n)setTimeout(()=>tg(n-1),3000)});tg(3)}};
+ /* ===== reliable outbox: persisted queue, retry with backoff, per-channel, rate-spaced, stale alerts expire ===== */
+ const OBX=()=>{try{return JSON.parse(store('adOutbox')||'[]')}catch(e){return[]}},OBS=q=>store('adOutbox',JSON.stringify(q.slice(-30)));
+ const APPURL='https://gyoutrain-lab.github.io/Trading_SMC_Scan_Multi_Asset_Alert_Adv_CRT/';
+ const rec=(ch,ok,info,lat)=>{window.PUSHST=window.PUSHST||{};const o=PUSHST[ch]||{};PUSHST[ch]={ok,info,at:Date.now(),lat:lat||o.lat,okAt:ok?Date.now():o.okAt};try{P.status&&P.status()}catch(e){}};
+ const fail=(m,f)=>{const e=new Error(m);e.fatal=!!f;return e};
+ async function sendOne(j){
+  if(j.ch==='ntfy'){const t0=Date.now();let r;
+   try{r=await fetch('https://ntfy.sh/',{method:'POST',body:JSON.stringify({topic:j.nt,title:j.title,message:j.msg,priority:j.pri,tags:j.tags,click:APPURL})})}catch(e){throw fail('offline or blocked')}
+   if(!r.ok&&r.status!==429){try{r=await fetch('https://ntfy.sh/'+encodeURIComponent(j.nt),{method:'POST',body:j.msg,headers:{Title:j.title.replace(/[^\x20-\x7e]/g,''),Priority:String(j.pri),Tags:j.tags.join(',')}})}catch(e){throw fail('offline or blocked')}}
+   if(!r.ok)throw fail(r.status===429?'ntfy rate limit (slowing down)':'HTTP '+r.status,r.status===400||r.status===403);
+   rec('ntfy',true,'HTTP '+r.status,Date.now()-t0)
+  }else{const t0=Date.now();let r,d;
+   try{r=await fetch('https://api.telegram.org/bot'+encodeURIComponent(j.tk)+'/sendMessage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:j.ci,text:j.title+'\n'+j.msg})});d=await r.json()}catch(e){throw fail('offline or blocked')}
+   if(!d.ok){const m=String(d.description||'error');throw fail(m.slice(0,70),/chat not found|Unauthorized|bot token|blocked by the user/i.test(m))}
+   rec('Telegram',true,'sent',Date.now()-t0)}}
+ const fb={};
+ async function flush(){for(const ch of['ntfy','tg']){if(fb[ch])continue;fb[ch]=1;
+  try{let q=OBX().filter(j=>Date.now()-j.at<j.ttl);let go=true;
+   while(go){const i=q.findIndex(j=>j.ch===ch);if(i<0)break;const j=q[i];if(Date.now()<(j.next||0))break;
+    try{await sendOne(j);q.splice(i,1);OBS(q);await new Promise(r=>setTimeout(r,1500))}
+    catch(e){const nm=ch==='ntfy'?'ntfy':'Telegram';j.tries=(j.tries||0)+1;
+     if(e.fatal||j.tries>=12){q.splice(i,1);rec(nm,false,(e.fatal?'rejected: ':'gave up: ')+e.message)}
+     else{j.next=Date.now()+Math.min(60000,2000*Math.pow(2,j.tries));rec(nm,false,e.message+' · retry '+j.tries+'/12')}
+     go=false}}
+   OBS(OBX().filter(j=>j.ch!==ch&&Date.now()-j.at<j.ttl).concat(q.filter(j=>j.ch===ch)))
+  }finally{fb[ch]=0}}
+  try{P.status&&P.status()}catch(e){}}
+ P.flush=flush;P.pending=()=>OBX().length;
+ P.out=(title,msg,pri,tags,opt)=>{P.hist(title,msg);P.note(title,msg);
+  const q=OBX(),now=Date.now(),nt=((document.getElementById('adNt')||{}).value||'').trim(),tk=store('adTg'),ci=store('adTc'),ttl=(opt&&opt.ttl)||9e5,tg=String(tags||'eyes').split(',');
+  const add=(ch,x)=>{if(q.some(y=>y.ch===ch&&y.title===title&&y.msg===msg&&now-y.at<30000))return;q.push(Object.assign({ch,title:String(title),msg:String(msg),pri:pri||4,tags:tg,at:now,ttl,tries:0},x))};
+  if(nt)add('ntfy',{nt});if(tk&&ci)add('tg',{tk,ci});OBS(q);setTimeout(flush,0)};
+ setTimeout(()=>{try{P.every(flush,2500)}catch(e){setInterval(flush,2500)}addEventListener('online',flush);document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')flush()})},600);
  /* timers that keep ticking when the tab is hidden (a Web Worker is not throttled like setInterval) */
  let wk=null,seq=0;const map={},fbs={};
  try{wk=new Worker(URL.createObjectURL(new Blob(['const T={};onmessage=e=>{const d=e.data;clearInterval(T[d.i]);if(d.c==="s")T[d.i]=setInterval(()=>postMessage(d.i),d.ms)}'],{type:'text/javascript'})));wk.onmessage=e=>{const f=map[e.data];if(f)try{f()}catch(x){}};wk.onerror=()=>{}}catch(e){wk=null}
@@ -1794,7 +1820,7 @@ PRO.every(()=>{if(LV.key&&LV.txt.indexOf('WebSocket')>=0&&Date.now()-LV.last>300
   ['adTg','adTc'].forEach(i=>$('#'+i).addEventListener('input',()=>{store(i,$('#'+i).value.trim());PRO.status()}));
   $('#adNt').addEventListener('input',()=>PRO.status());
   $('#adSnz').addEventListener('click',()=>{store('adSnz',PRO.snoozed()?'0':String(Date.now()+9e5));PRO.status()});
-  $('#adTp').addEventListener('click',()=>{PRO.unlock();PRO.beep();PRO.out('SMC test push','Test push from SMC Analyzer. If this reaches your phone, the channel works.',4,'white_check_mark')});
+  $('#adTp').addEventListener('click',()=>{PRO.unlock();PRO.beep();const id='T'+Date.now().toString(36);window.PUSHV=null;PRO.out('SMC test push','Test '+new Date().toLocaleTimeString()+' ['+id+']. Jika ini muncul di HP Anda, saluran bekerja.',4,'white_check_mark',{ttl:12e4});setTimeout(()=>window.verifyPush&&verifyPush(id),5000);setTimeout(()=>window.verifyPush&&!window.PUSHV&&verifyPush(id),12000)});
   $('#adHc').addEventListener('click',()=>{store('adHist','[]');PRO.renderHist()});
   $('#alerts').checked=store('alerts')!=='0';$('#alerts').addEventListener('change',e=>store('alerts',e.target.checked?'1':'0'));
   PRO.status=function(){const A=window._AD,el=$('#adSt');if(!A||!el)return;
@@ -2351,6 +2377,7 @@ window.phonePanel=()=>{const el=$('#adPhone');if(!el)return;const nt=($('#adNt')
   else if(nt)h.push('Phone setup: install the <b>ntfy</b> app, subscribe to topic <b>'+esc(nt)+'</b> (same spelling), allow notifications and battery "unrestricted" for it, then press Test push channels. Use a long random topic: anyone who knows it can read the alerts.');
   else if(tg)h.push('Telegram: open your bot in the phone app and press Start once, otherwise the bot cannot message you.');
   el.innerHTML=h.join('<br>')};
+{const _pp=window.phonePanel;window.phonePanel=()=>{_pp();try{rdyPanel()}catch(e){}}}
 const keys=['adNt','adTg','adTc','adPh'];
 const cfgCode=()=>{const o={};keys.forEach(k=>o[k]=store(k)||'');return btoa(unescape(encodeURIComponent(JSON.stringify(o))))};
 const base=()=>location.protocol==='file:'?'https://gyoutrain-lab.github.io/Trading_SMC_Scan_Multi_Asset_Alert_Adv_CRT/':location.href.split('#')[0];
@@ -2359,6 +2386,30 @@ try{const m=location.hash.match(/cfg=([^&]+)/);if(m&&impCode(decodeURIComponent(
 const ap=document.getElementById('adPhone');
 if(ap)ap.insertAdjacentHTML('afterend',`<div class="ckh">Android · hubungkan HP (3 langkah, tanpa server)</div><div class="hint" style="line-height:1.6"><b>1.</b> Pasang aplikasi <b>ntfy</b> (Play Store / F-Droid) di HP. <b>2.</b> Tekan tombol di bawah: ntfy terbuka dan langsung berlangganan ke topik Anda. <b>3.</b> Tekan <i>Test push channels</i>: HP harus berbunyi walau layar mati. Di ntfy izinkan notifikasi dan atur baterai ke "Unrestricted".</div><div class="ctl" style="margin-top:6px"><a id="adNtApp" class="badge" style="padding:8px 12px">📲 Buka ntfy &amp; subscribe</a><a class="badge" style="padding:8px 12px" href="https://play.google.com/store/apps/details?id=io.heckel.ntfy" target="_blank" rel="noopener">Play Store</a><a class="badge" style="padding:8px 12px" href="https://f-droid.org/packages/io.heckel.ntfy/" target="_blank" rel="noopener">F-Droid</a><button id="adLn">🔗 Salin link pengaturan</button><a id="adWl" class="badge" style="padding:8px 12px" target="_blank" rel="noopener">Kirim link via WhatsApp</a><a id="adWeb" class="badge" style="padding:8px 12px" target="_blank" rel="noopener">Tanpa app: buka di browser HP</a></div><div class="hint">Topik ntfy dibuat acak otomatis di perangkat ini. Siapa pun yang tahu topik bisa membaca alert, jadi jangan dibagikan. Alert dikirim dari tab yang sedang terbuka (desktop, atau HP dengan layar menyala). Untuk alert saat HP terkunci, biarkan analyzer berjalan di desktop/tablet dan terima push lewat ntfy.</div>`);
 const refAp=()=>{const t=($('#adNt').value||'').trim(),a=$('#adNtApp'),w=$('#adWl'),b=$('#adWeb');if(!a)return;a.href=t?'ntfy://ntfy.sh/'+encodeURIComponent(t):'#';b.href=t?'https://ntfy.sh/'+encodeURIComponent(t):'#';w.href='https://wa.me/?text='+encodeURIComponent('Pengaturan alert SMC: '+base()+'#cfg='+encodeURIComponent(cfgCode()))};
+window.verifyPush=async id=>{const nt=($('#adNt').value||'').trim();if(!nt)return;try{const r=await fetch('https://ntfy.sh/'+encodeURIComponent(nt)+'/json?poll=1&since=10m');const t=await r.text();window.PUSHV={ok:t.indexOf(id)>=0,at:Date.now()}}catch(e){window.PUSHV={ok:false,at:Date.now(),err:1}}try{PRO.status()}catch(e){}};
+function rdyPanel(){const el=$('#adReady');if(!el)return;const A=window._AD||{},T=window.PUSHST||{},V=window.PUSHV,nt=($('#adNt').value||'').trim(),tg=!!(store('adTg')&&store('adTc')),n=Date.now(),pend=PRO.pending?PRO.pending():0;
+ const row=(st,t,d)=>`<div class="ck"><b class="${st===true?'up':st===false?'dn':'warn'}">${st===true?'✓':st===false?'✗':'…'}</b><div><span>${t}</span><small>${d}</small></div></div>`,ago=t=>t?Math.round((n-t)/1000)+' dtk lalu':'belum pernah';
+ const eng=!!A.on&&!!A.last&&n-A.last<9e4,nOk=!!(T.ntfy&&T.ntfy.ok),tOk=!!(T.Telegram&&T.Telegram.ok),any=nt||tg,sent=nOk||tOk,bad=(T.ntfy&&!T.ntfy.ok)||(T.Telegram&&!T.Telegram.ok);
+ let cls,hd,sub;
+ if(!any){cls='dn';hd='HP BELUM TERHUBUNG';sub='Belum ada saluran push. Isi topik ntfy atau Telegram, lalu tekan Test push channels.'}
+ else if(!A.on){cls='warn';hd='ALERT MATI';sub='Tekan Start alerts agar mesin memindai dan mengirim ke HP.'}
+ else if(!eng){cls='dn';hd='MESIN TERHENTI';sub='Pemindaian terakhir lebih dari 90 detik lalu. Tab mungkin dibekukan: buka tab ini, atau jalankan di desktop dengan layar menyala.'}
+ else if(bad&&!sent){cls='dn';hd='PUSH GAGAL';sub='Server menolak atau jaringan terblokir. Lihat detail di bawah.'}
+ else if(!sent){cls='warn';hd='MESIN AKTIF · PUSH BELUM DIUJI';sub='Tekan Test push channels untuk memastikan HP menerima.'}
+ else{cls='up';hd='SIAP · ALERT DIKIRIM KE HP';sub='Server push menerima pesan. Penerimaan di HP bergantung aplikasi ntfy/Telegram terpasang dan notifikasinya diizinkan.'}
+ let h=`<div class="vd ${cls}">${hd}<small>${sub}</small></div>`;
+ h+=row(eng,'Mesin alert',!A.on?'mati':'pemindaian terakhir '+ago(A.last));
+ h+=row(nt?(T.ntfy?T.ntfy.ok:null):false,'ntfy',nt?(T.ntfy?(T.ntfy.ok?'terkirim ('+ago(T.ntfy.okAt)+(T.ntfy.lat?', '+T.ntfy.lat+' ms':'')+')':'gagal: '+esc(T.ntfy.info)):'belum diuji'):'topik kosong');
+ if(V)h+=row(V.ok,'Verifikasi server ntfy',V.ok?'pesan tes tersimpan di server topik Anda. Cek HP: harus berbunyi.':V.err?'tidak bisa menghubungi ntfy untuk verifikasi':'pesan tes tidak ditemukan di topik: periksa nama topik');
+ h+=row(tg?(T.Telegram?T.Telegram.ok:null):null,'Telegram',tg?(T.Telegram?(T.Telegram.ok?'terkirim ('+ago(T.Telegram.okAt)+')':'gagal: '+esc(T.Telegram.info)):'belum diuji'):'opsional, belum diisi');
+ h+=row(pend?false:true,'Antrian kirim',pend?pend+' pesan menunggu (dicoba ulang otomatis, kedaluwarsa 15 mnt)':'kosong');
+ el.innerHTML=h}
+(function(){const ap=document.getElementById('adPhone');if(ap&&!document.getElementById('adReady'))ap.insertAdjacentHTML('beforebegin','<div class="ckh">Kesiapan alert ke HP · live</div><div id="adReady"></div>');
+ const ctl=document.getElementById('adWeb');if(ctl)ctl.insertAdjacentHTML('afterend','<button id="adTgd">Deteksi chat ID Telegram</button>');
+ const b=document.getElementById('adTgd');if(b)b.addEventListener('click',async()=>{const tk=store('adTg');if(!tk){alert('Isi Telegram bot token dulu, lalu kirim /start ke bot Anda di HP.');return}
+  try{const j=await(await fetch('https://api.telegram.org/bot'+encodeURIComponent(tk)+'/getUpdates')).json();if(!j.ok)throw new Error(j.description);
+   const u=(j.result||[]).map(x=>(x.message||x.channel_post||{}).chat).filter(Boolean).pop();if(!u){alert('Belum ada pesan ke bot. Buka bot di Telegram, tekan Start / kirim /start, lalu tekan tombol ini lagi.');return}
+   store('adTc',String(u.id));$('#adTc').value=String(u.id);PRO.status();alert('Chat ID terdeteksi dan disimpan: '+u.id)}catch(e){alert('Gagal: '+e.message)}})})();
 refAp();$('#adNt').addEventListener('input',refAp);setInterval(refAp,4000);
 if($('#adLn'))$('#adLn').addEventListener('click',async()=>{const u=base()+'#cfg='+encodeURIComponent(cfgCode());try{await navigator.clipboard.writeText(u);alert('Link disalin. Buka link ini di Chrome HP: topik ntfy dan Telegram otomatis terimpor. Jaga kerahasiaannya.')}catch(e){prompt('Salin link ini:',u)}});
 $('#adCx').addEventListener('click',async()=>{const o={};keys.forEach(k=>o[k]=store(k)||'');const code=btoa(unescape(encodeURIComponent(JSON.stringify(o))));
