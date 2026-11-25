@@ -649,7 +649,7 @@ function renderMx(){
   if(!mg.ok)h+=`<div class="hint"><b class="dn">This account cannot carry the stop safely.</b> Wait for a tighter order block, lower the leverage used, or add balance. Never widen the stop to "give it room".</div>`;
   el.innerHTML=h;
 }
-function rankParts(g){const a=g.entry!=null?100:0,s=(g.score||0)*10,z=g.inZone?5:0,d=-Math.min(g.dist==null?9:g.dist,9)/10;const f=g.entry==null&&g.failedAll?Math.min(g.failedAll.length,3)*5:0;return{a,s,z,d,total:a+s+z+d-f}}
+function rankParts(g){const a=g.entry!=null?100:0,s=(g.score||0)*10,z=g.inZone?5:0,d=-Math.min(g.dist==null?9:g.dist,9)/10;const f=g.entry==null&&g.failedAll?Math.min(g.failedAll.length,3)*5:0;return{a,s,z,d,total:a+s+z+d-f-(g.hold?20:0)}}
 const rankTip=g=>{const p=rankParts(g);return `Active plan ${p.a?'+100':'0'} · score ${g.score}/10 = +${p.s} · in zone +${p.z} · distance ${p.d.toFixed(1)} → ${p.total.toFixed(1)}`};
 const fT=t=>new Date(t).toISOString().slice(5,16).replace('T',' ')+'Z';
 /* Replays the engine bar by bar (data up to each bar only) to show WHEN each confluence factor appeared */
@@ -844,7 +844,7 @@ const stats=a=>{const n=a.length,w=a.filter(x=>x>0).length,m=n?a.reduce((p,x)=>p
   return{n,w,m,pf:gl?gp/gl:(gp?99:0),dd,lo:n?(p+z*z/(2*n)-z*Math.sqrt((p*(1-p)+z*z/(4*n))/n))/(1+z*z/n):0}};
 function edgeStat(){const b=S.btc&&S.btc[S.btKey];if(!b)return null;const x=b.V;if(x.n<8)return{s:'small',n:x.n,m:x.m,pf:x.pf,w:x.w};return x.m>0&&x.pf>=1.1?{s:'ok',n:x.n,m:x.m,pf:x.pf,w:x.w}:{s:'bad',n:x.n,m:x.m,pf:x.pf,w:x.w}}
 function verdict(sg){
-  if(sg.entry==null)return sg.watch?{c:'warn',t:'WATCH · NOT VERIFIED',s:'A candidate zone exists but fails: '+sg.failed+'. Do not trade it.'}:{c:'',t:'NO ENTRY',s:'Nothing valid to enter right now'};
+  if(sg.entry==null)return sg.hold?{c:'dn',t:'HOLD · LIVE 5M FLOW AGAINST THE PLAN',s:sg.sub}:sg.watch?{c:'warn',t:'WATCH · NOT VERIFIED',s:'A candidate zone exists but fails: '+sg.failed+'. Do not trade it.'}:{c:'',t:'NO ENTRY',s:'Nothing valid to enter right now'};
   if(!sg.verified)return{c:'warn',t:'UNVERIFIED SETUP',s:'Fails: '+sg.failed+'. Treat as a possible fake.'};
   const gv=govState();if(gv.paused)return{c:'dn',t:'RISK GOVERNOR · TRADING PAUSED',s:gv.msg};
   const e=edgeStat(),et=!e?(S.btBusy?' Backtest running…':' Backtest not run yet.'):e.s==='ok'?` Replay edge OK (${e.n} trades, PF ${e.pf.toFixed(2)}, ${e.m.toFixed(2)}R net).`:` Replay sample small (${e.n} trades): edge not proven.`;
@@ -884,7 +884,7 @@ function buildSignal(c,A,htfTrend,px,opt){
     if(lastEv&&lastEv.dir===dir&&lastEv.ok){s+=1;why.push(`Last break confirmed by volume + displacement (${lastEv.rv.toFixed(1)}x)`)}
     return{dir,score:s,why,ob,inZone};
   }
-  const lg=evalDir(1),sh=evalDir(-1),pick=lg.score>=sh.score?lg:sh;
+  const lg=evalDir(1),sh=evalDir(-1),pick=lg.score>=sh.score?lg:sh;let P=null;if(!opt.bt){try{P=window.pulseFor?window.pulseFor(sy,a):null}catch(e){P=null}}out.pulse=P;
   {const n12=Math.min(12,L-1);out.rally=a?(last-c[L-1-n12].c)/a:0}out.longScore=lg.score;out.shortScore=sh.score;out.max=12;out.dir=pick.dir;out.score=pick.score;out.why=pick.why;
   if(pick.score>=5&&pick.ob){
     const d=pick.dir,ob=pick.ob,entry=d>0?ob.top:ob.bot,sw=A.sweeps.find(x=>x.dir===d&&L-1-x.idx<=40);
@@ -921,6 +921,7 @@ function buildSignal(c,A,htfTrend,px,opt){
       {k:'Premium / Discount',ok:pdOK,txt:pdOK?`OB sits in ${d>0?'discount':'premium'} of the range`:`OB is on the wrong side of 50% (${d>0?'buying premium':'selling discount'})`},
       {n:'C',k:'CRT sync',ok:crtOk(K,d,ob,c),txt:crtTxt(K,d,ob,c)},
       {k:'Candle movement',ok:!moveBlock(M,d,K),txt:moveTxt(M,d,K)},
+      {k:'Live 5m flow',ok:!(P&&P.state==='strong'&&P.dir===-d),txt:P?P.txt+((P.state==='strong'&&P.dir===-d)?': pushing AGAINST this trade':(P.state==='stale'||P.state==='collecting')?'':': does not oppose it'):'No live tick feed: 5m flow not checked'},
       {k:'Costs & R:R',ok:out.cr<=.1&&out.rr1>=1.5,txt:`TP1 ${out.rr1.toFixed(1)}R, spread+slip ${Math.round(out.cr*100)}% of stop`+(out.cr>.1?' (too high)':out.rr1<1.5?' (R:R too low)':'')}
     ];
     if(metal){
@@ -948,6 +949,10 @@ function buildSignal(c,A,htfTrend,px,opt){
     out.grade=pick.score>=7&&htfTrend===d&&out.rr>=2&&out.cr<=.1&&pocOK&&(!metal||amOK)?'A':pick.score>=6?'B':'C';
     if(out.cr>.15){out.status='NO TRADE';out.sub='Spread+slippage is '+Math.round(out.cr*100)+'% of the stop distance: costs would eat the edge';out.entry=null}
     else if(metal&&(c[1].t-c[0].t)<9e5&&!(K&&!K.pend&&K.dir===out.dir)&&!(window.LTFMET&&LTFMET())){out.status='NO TRADE';out.sub='Gold/Silver: below 15m the spread and noise burn small stops. Use 15m or higher';out.entry=null}
+    else if(!opt.bt&&P&&P.state==='strong'&&P.dir===-d){const zb=fmt(ob.bot,sy)+'–'+fmt(ob.top,sy),w=d>0?'BUY':'SELL',ds=pick.inZone?'price is inside it now':(out.dist||0).toFixed(1)+' ATR away';
+      out.status='NO TRADE';out.hold=true;out.watch=true;out.entry=null;out.failed='Live 5m flow';
+      out.holdShort='zone '+zb+' · '+ds+' · wait for 5m rejection';
+      out.sub='HOLD: the live 5m is pushing '+(P.dir>0?'UP':'DOWN')+' against the '+w+' plan ('+P.txt+'). Plan zone '+zb+' ('+ds+'). Do not '+w.toLowerCase()+' now and do not leave a '+w+' limit armed. Re-arm only after a 5m candle rejects the zone (closes back out of it) or a 5m CHoCH prints. Plan is void beyond '+fmt(out.sl,sy)+'.'}
     else if(!opt.bt&&M&&moveBlock(M,d,K)){out.status='NO TRADE';out.sub='Candle movement ('+M.tf+'): '+moveBlock(M,d,K);out.entry=null;out.watch=true;out.failed='Candle movement'}
     else if(vonly&&!opt.bt&&!out.verified){out.status='NO TRADE';out.sub='Not verified, possible fake. Failed: '+out.failed;out.entry=null;out.watch=true}
     else if(($('#sniper').checked||metal)&&!opt.bt&&out.grade!=='A'){out.status='NO TRADE';out.sub='Grade '+out.grade+': needs score ≥7, HTF aligned, entry on the correct side of the POC'+(metal?', a clear AMD phase':'')+', R:R ≥ 2';out.entry=null;out.watch=true;out.failed='grade '+out.grade+' (needs A)'}
@@ -955,6 +960,7 @@ function buildSignal(c,A,htfTrend,px,opt){
   }else{
     out.status='NO TRADE';out.sub=pick.score>=3?'Partial confluence, wait for a cleaner setup':'No confluence, stand aside';
   }
+  if(out.entry==null&&!out.hold&&P&&P.state==='strong'&&out.dir&&P.dir===-out.dir){out.sub=(out.sub||'')+' · Live: '+P.txt+' (against the '+(out.dir>0?'long':'short')+' bias, do not fade it)'}
   if(px!=null&&out.entry!=null){const dd=out.dir;if(dd>0?px<=out.sl:px>=out.sl){out.status='NO TRADE';out.sub='Live price is already beyond the stop: setup invalid';out.entry=null}else if(!out.inZone&&(dd>0?px>=out.tp1:px<=out.tp1)){out.status='NO TRADE';out.sub='Price already reached TP1 without filling: setup missed';out.entry=null}}
   if(S.demo&&!opt.bt){out.entry=null;out.status='NO TRADE';out.sub='DEMO data, not a live market: no signal. Enter a valid key and a symbol your plan includes.'}
   return out;
@@ -1369,12 +1375,12 @@ function ordType(s,sym){const d=S.D&&S.D[sym],px=d?d.px:null;if(s.inZone)return 
 function renderScan(){
   const rank=r=>r.err?-1:rankParts(r.sg).total;
   const rows=[...S.scan].sort((a,b)=>rank(b)-rank(a));
-  let h='<thead><tr><th>Symbol</th><th>Trend/HTF</th><th>Signal</th><th>AMD</th><th>Score</th><th>Gates</th><th>Entry</th><th>SL</th><th>TP1</th><th>R:R</th><th>Dist</th><th>Rank</th><th>Live</th></tr></thead><tbody>';
+  let h='<thead><tr><th>Symbol</th><th>Trend/HTF</th><th>5m Flow</th><th>Signal</th><th>AMD</th><th>Score</th><th>Gates</th><th>Entry</th><th>SL</th><th>TP1</th><th>R:R</th><th>Dist</th><th>Rank</th><th>Live</th></tr></thead><tbody>';
   const tn=t=>t>0?'<span class="up">▲</span>':t<0?'<span class="dn">▼</span>':'–';
   rows.forEach(r=>{
-    if(r.err){h+=`<tr data-s="${esc(r.sym)}"><td>${esc(r.sym)}</td><td colspan="11" class="warn" style="text-align:left">${esc(r.err)}</td></tr>`;return}
+    if(r.err){h+=`<tr data-s="${esc(r.sym)}"><td>${esc(r.sym)}</td><td colspan="12" class="warn" style="text-align:left">${esc(r.err)}</td></tr>`;return}
     const s=r.sg,c=s.entry==null?'':(s.dir>0?'up':'dn'),gt=s.chk?s.chk.filter(x=>x.ok).length+'/'+s.chk.length:'–';
-    h+=`<tr data-s="${esc(r.sym)}"><td><b>${esc(r.sym)}</b></td><td>${tn(r.A.trend)} / ${r.h==null?'–':tn(r.h)}</td><td class="${c}">${s.entry==null?(s.watch?'<span class="warn">Watch · needs '+esc(s.failed)+(s.failedAll&&s.failedAll.length>1?' +'+(s.failedAll.length-1)+' more':'')+(s.rally&&s.dir&&s.rally*s.dir<-1.5?' · counter-move '+(s.rally>0?'▲':'▼')+Math.abs(s.rally).toFixed(1)+' ATR':'')+'</span>':'No trade'):(s.dir>0?'LONG':'SHORT')+(s.inZone?(s.react?' · CONFIRMED':' · ACTIVE'):' · pending')}</td><td>${r.am.ph}</td><td>${s.score}/${s.max||10}</td><td class="${s.verified?'up':''}">${gt}</td><td>${fmt(s.entry,r.sym)}${s.entry!=null?'<br><small>'+ordType(s,r.sym)+'</small>':''}</td><td>${s.entry==null&&s.sl!=null?'<span style="opacity:.4" title="idea only, no valid entry">'+fmt(s.sl,r.sym)+'</span>':fmt(s.sl,r.sym)}</td><td>${s.entry==null&&s.tp1!=null?'<span style="opacity:.4" title="idea only, no valid entry">'+fmt(s.tp1,r.sym)+'</span>':fmt(s.tp1,r.sym)}</td><td>${s.entry==null?'–':s.rr.toFixed(1)}</td><td>${s.entry==null?(s.dist!=null?'<span style="opacity:.4">('+s.dist.toFixed(1)+' ATR)</span>':'–'):s.dist.toFixed(1)+' ATR'}</td><td title="${esc(rankTip(s))}">${rankParts(s).total.toFixed(1)}</td><td data-lv="${esc(r.sym)}">${lvCell(r.sym)}</td></tr>`;
+    h+=`<tr data-s="${esc(r.sym)}"><td><b>${esc(r.sym)}</b></td><td>${tn(r.A.trend)} / ${r.h==null?'–':tn(r.h)}</td><td>${flowCell(s)}</td><td class="${c}" title="${esc(s.sub||'')}">${s.entry==null?(s.hold?'<span class="dn"><b>HOLD</b> · 5m '+(s.pulse&&s.pulse.dir>0?'▲':'▼')+' vs '+(s.dir>0?'BUY':'SELL')+' plan</span><br><small>'+esc(s.holdShort||'')+'</small>':s.watch?'<span class="warn">Watch · needs '+esc(s.failed)+(s.failedAll&&s.failedAll.length>1?' +'+(s.failedAll.length-1)+' more':'')+(s.rally&&s.dir&&s.rally*s.dir<-1.5?' · counter-move '+(s.rally>0?'▲':'▼')+Math.abs(s.rally).toFixed(1)+' ATR':'')+'</span>':'No trade'):(s.dir>0?'LONG':'SHORT')+(s.inZone?(s.react?' · CONFIRMED':' · ACTIVE'):' · pending')}</td><td>${r.am.ph}</td><td>${s.score}/${s.max||10}</td><td class="${s.verified?'up':''}">${gt}</td><td>${fmt(s.entry,r.sym)}${s.entry!=null?'<br><small>'+ordType(s,r.sym)+'</small>':''}</td><td>${s.entry==null&&s.sl!=null?'<span style="opacity:.4" title="idea only, no valid entry">'+fmt(s.sl,r.sym)+'</span>':fmt(s.sl,r.sym)}</td><td>${s.entry==null&&s.tp1!=null?'<span style="opacity:.4" title="idea only, no valid entry">'+fmt(s.tp1,r.sym)+'</span>':fmt(s.tp1,r.sym)}</td><td>${s.entry==null?'–':s.rr.toFixed(1)}</td><td>${s.entry==null?(s.dist!=null?'<span style="opacity:.4">('+s.dist.toFixed(1)+' ATR)</span>':'–'):s.dist.toFixed(1)+' ATR'}</td><td title="${esc(rankTip(s))}">${rankParts(s).total.toFixed(1)}</td><td data-lv="${esc(r.sym)}">${lvCell(r.sym)}</td></tr>`;
   });
   $('#tbl').innerHTML=h+'</tbody>';
   document.querySelectorAll('#tbl tbody tr').forEach(tr=>tr.onclick=()=>{$('#sym').value=tr.dataset.s;$('#tf').value=$('#scStyle').value;S.mode='live';S.lastKey=null;S.offset=0;load()});
@@ -1408,7 +1414,7 @@ function useCr(k){const day=new Date().toISOString().slice(0,10);let o={};try{o=
 function sbuild(sym,h,st,n){const d=S.D[sym],A=analyze(d,n);S.cur=sym;const r={sym,A,h,sg:buildSignal(d,A,h,d.px),am:amd(d,A,vprofile(d,LB[st]))};S.cur=null;return r}
 async function livePx(sym){if(BN.ok(sym))return bnPx(sym);await slot();
   const j=await(await fetch(`https://api.twelvedata.com/price?symbol=${encodeURIComponent(sym)}&apikey=${encodeURIComponent(TDK())}`)).json();useCr(1);return j&&j.price?+j.price:null}
-const sk=r=>r.sg.status+'|'+r.sg.inZone+'|'+(r.sg.entry!=null);
+const sk=r=>r.sg.status+'|'+r.sg.inZone+'|'+(r.sg.entry!=null)+'|'+(r.sg.hold?'H':'');
 function chg(r,b){if(sk(r)!==b){const m=`${r.sym}: ${r.sg.status}${r.sg.entry!=null?' @ '+fmt(r.sg.entry,r.sym):''}${r.sg.inZone?' · IN ZONE':''}`;log(m);notify(m)}}
 /* Live auto-scan: candles refresh only when a bar closes (structure changes only then); live price is polled only for symbols with an active plan */
 async function autoCycle(){
@@ -2144,7 +2150,7 @@ function applyTick(sym,p,st){const d=S.D&&S.D[sym];if(!d||!d.length)return false
   if(d.lv&&now<d.lv.t+s){const l=d.lv;l.c=p;if(p>l.h)l.h=p;if(p<l.l)l.l=p}
   else if(!d.lv){const b=Math.floor(now/s)*s;if(b===d[d.length-1].t+s)d.lv={t:b,o:p,h:p,l:p,c:p,v:0}}
   return true}
-const sigOf=r=>r.sg.status+'|'+r.sg.entry+'|'+r.sg.inZone+'|'+Math.round((r.sg.dist||0)*10)+'|'+(r.h==null?'':r.h);
+const sigOf=r=>r.sg.status+'|'+r.sg.entry+'|'+r.sg.inZone+'|'+Math.round((r.sg.dist||0)*10)+'|'+(r.h==null?'':r.h)+'|'+(r.sg.hold?'H':'');
 function rebuild(r,st,n){const b=sk(r),d=S.D[r.sym],key=d.length+'|'+d[d.length-1].t,os=r.sg?sigOf(r):'';
   try{if(r.A&&r._k===key){S.cur=r.sym;try{r.sg=buildSignal(d,r.A,r.h,d.px)}finally{S.cur=null}}else{Object.assign(r,sbuild(r.sym,r.h,st,n));r._k=key}}catch(e){S.cur=null;return false}
   LV2.recalc++;LV2.rebuiltAt=Date.now();chg(r,b);r._chg=os!==sigOf(r);return true}
@@ -2327,6 +2333,43 @@ const TC={};
   return _td3(sym,tf,force,abort)}}
 
 const TD_INT={'30s':3000,'1m':5000,'5m':10000},TDU={};window.tfDue=(sym,tf)=>{const k=sym+'|'+tf,n=Date.now();if(n-(TDU[k]||0)<(TD_INT[tf]||30000))return false;TDU[k]=n;return true};
+
+/* ===== LIVE 5m FLOW: real-tick momentum, independent of the scan timeframe (fixes "price rallies, signal stays SELL") ===== */
+const PULSE={strong15:2.2,strongC:3,strongC15:1.5,strongBrk:1.5,mild15:1.0,stale:30000,minCover:8};
+const _pc={};
+window.pulseFor=function(sym,scanAtr){
+  sym=(sym||'').toUpperCase();if(!sym)return null;
+  const o=store_(sym),now=Date.now(),hit=_pc[sym];
+  if(hit&&now-hit.at<1000)return hit.p;
+  if(!o.seeded&&!o.seeding){try{tkmSeed(sym)}catch(e){}}
+  const n=o.t.length;let p;
+  if(n<20){p={dir:0,state:'collecting',txt:'collecting ticks ('+n+')',m5:0,m15:0,m30:0,consec:0,brk:0}}
+  else{
+    const lastT=o.t[n-1],px=lastT[1],cover=(now-o.t[0][0])/60000;
+    if(now-lastT[0]>PULSE.stale)p={dir:0,state:'stale',txt:'tick feed stale ('+Math.round((now-lastT[0])/1000)+'s): live flow unknown',m5:0,m15:0,m30:0,consec:0,brk:0,px};
+    else if(cover<PULSE.minCover)p={dir:0,state:'collecting',txt:'only '+cover.toFixed(0)+' min of ticks so far',m5:0,m15:0,m30:0,consec:0,brk:0,px};
+    else{
+      const at=ms=>{const T=now-ms;let lo=0,hi=n-1;while(lo<hi){const m=(lo+hi+1)>>1;if(o.t[m][0]<=T)lo=m;else hi=m-1}return o.t[lo][0]<=T?o.t[lo][1]:o.t[0][1]};
+      const r=tkmBars(sym,'5m'),cl=r?r.bars:[],cur=r?r.cur:null,w=cl.slice(-24);
+      const u=w.length>=6?w.reduce((s,x)=>s+(x.h-x.l),0)/w.length:(scanAtr||px*5e-4)*.3;
+      const p5=at(3e5),p15=at(9e5),p30=at(18e5),m5=(px-p5)/u,m15=(px-p15)/u,m30=(px-p30)/u,sg=Math.sign(m15);
+      let consec=0;for(let i=cl.length-1;i>=0&&sg;i--){if((cl[i].c-cl[i].o)*sg>0)consec++;else break}
+      if(sg&&cur&&consec>0&&(cur.c-cur.o)*sg>0)consec++;
+      let brk=0,rh=null,rl=null;
+      if(cl.length>=8){const z=cl.slice(-13,-1);rh=Math.max(...z.map(x=>x.h));rl=Math.min(...z.map(x=>x.l));brk=px>rh?1:px<rl?-1:0}
+      const a15=Math.abs(m15),strong=!!sg&&(a15>=PULSE.strong15||(consec>=PULSE.strongC&&a15>=PULSE.strongC15)||(brk===sg&&a15>=PULSE.strongBrk)),
+        mild=!strong&&!!sg&&(a15>=PULSE.mild15||(consec>=2&&Math.abs(m5)>=.5)),
+        state=strong?'strong':mild?'mild':'flat',arrow=sg>0?'▲':'▼';
+      const txt=state==='flat'?'5m flow flat ('+(m15>=0?'+':'')+m15.toFixed(1)+'u/15m)':
+        '5m flow '+arrow+' '+(m15>=0?'+':'')+m15.toFixed(1)+'u/15m ('+fmt(p15,sym)+'→'+fmt(px,sym)+'), '+consec+' '+(sg>0?'up':'down')+'-closes'+(brk?', broke 5m '+(brk>0?'high '+fmt(rh,sym):'low '+fmt(rl,sym)):'');
+      p={dir:state==='flat'?0:sg,state,m5,m15,m30,consec,brk,u,px,txt,rh,rl};
+    }
+  }
+  _pc[sym]={at:now,p};return p};
+function flowCell(s){const P=s.pulse;if(!P)return'<small class="warn">no tick feed</small>';
+  if(P.state==='stale'||P.state==='collecting')return'<small class="warn" title="'+esc(P.txt)+'">'+P.state+'</small>';
+  const a=P.dir>0?'▲':P.dir<0?'▼':'↔',c=P.state==='flat'?'':(P.dir>0?'up':'dn');
+  return'<span class="'+c+'" title="'+esc(P.txt)+'"><b>'+(P.state==='strong'?a+a:P.state==='mild'?a:'↔')+'</b></span><br><small>'+(P.m15>=0?'+':'')+P.m15.toFixed(1)+'u/15m</small>'}
 /* UI: switches */
 $('#adTfs').insertAdjacentHTML('afterend',`<div id="rdOpt" style="display:flex;gap:12px;flex-wrap:wrap;margin-top:6px;font-size:12px">
  <label class="chk"><input type="checkbox" id="rdBig" checked> Big-move alerts</label>
